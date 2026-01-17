@@ -2,6 +2,7 @@ package broker
 
 import (
 	"context"
+	"sort"
 	"strconv"
 	"time"
 )
@@ -9,6 +10,8 @@ import (
 func intervalDuration(interval CandleInterval) (time.Duration, error) {
 	switch interval {
 	case CandleIntervalTick:
+		return 0, ErrNotSupported
+	case CandleIntervalSecond:
 		return time.Second, nil
 	case CandleIntervalMinute:
 		return time.Minute, nil
@@ -70,4 +73,95 @@ func channelWithError(err error) (<-chan Candle, <-chan error) {
 	close(out)
 	close(errs)
 	return out, errs
+}
+
+type tradeTick struct {
+	Time  time.Time
+	Price float64
+	Size  float64
+}
+
+func tickCandles(symbol string, trades []tradeTick) []Candle {
+	if len(trades) == 0 {
+		return nil
+	}
+	sort.Slice(trades, func(i, j int) bool {
+		return trades[i].Time.Before(trades[j].Time)
+	})
+	out := make([]Candle, 0, len(trades))
+	for _, t := range trades {
+		out = append(out, Candle{
+			Symbol:    symbol,
+			Interval:  CandleIntervalTick,
+			OpenTime:  t.Time,
+			CloseTime: t.Time,
+			Open:      formatFloat(t.Price),
+			High:      formatFloat(t.Price),
+			Low:       formatFloat(t.Price),
+			Close:     formatFloat(t.Price),
+			Volume:    formatFloat(t.Size),
+			Trades:    "1",
+		})
+	}
+	return out
+}
+
+func aggregateSecondCandles(symbol string, trades []tradeTick) []Candle {
+	if len(trades) == 0 {
+		return nil
+	}
+	sort.Slice(trades, func(i, j int) bool {
+		return trades[i].Time.Before(trades[j].Time)
+	})
+
+	out := make([]Candle, 0)
+	curSec := trades[0].Time.Unix()
+	open := trades[0].Price
+	high := trades[0].Price
+	low := trades[0].Price
+	closePrice := trades[0].Price
+	volume := trades[0].Size
+	tradeCount := 1
+
+	flush := func(sec int64) {
+		start := time.Unix(sec, 0)
+		out = append(out, Candle{
+			Symbol:    symbol,
+			Interval:  CandleIntervalSecond,
+			OpenTime:  start,
+			CloseTime: start.Add(time.Second),
+			Open:      formatFloat(open),
+			High:      formatFloat(high),
+			Low:       formatFloat(low),
+			Close:     formatFloat(closePrice),
+			Volume:    formatFloat(volume),
+			Trades:    strconv.Itoa(tradeCount),
+		})
+	}
+
+	for i := 1; i < len(trades); i++ {
+		sec := trades[i].Time.Unix()
+		if sec != curSec {
+			flush(curSec)
+			curSec = sec
+			open = trades[i].Price
+			high = trades[i].Price
+			low = trades[i].Price
+			closePrice = trades[i].Price
+			volume = trades[i].Size
+			tradeCount = 1
+			continue
+		}
+		if trades[i].Price > high {
+			high = trades[i].Price
+		}
+		if trades[i].Price < low {
+			low = trades[i].Price
+		}
+		closePrice = trades[i].Price
+		volume += trades[i].Size
+		tradeCount++
+	}
+	flush(curSec)
+	return out
 }

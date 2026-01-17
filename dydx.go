@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
+	"sort"
 	"strings"
 	"time"
 
@@ -60,6 +61,9 @@ func (c *dydxClient) Capabilities() Capabilities {
 }
 
 func (c *dydxClient) SubscribeCandles(ctx context.Context, symbol string, interval CandleInterval) (<-chan Candle, <-chan error) {
+	if interval == CandleIntervalTick {
+		return c.subscribeTicks(ctx, symbol)
+	}
 	dur, err := intervalDuration(interval)
 	if err != nil {
 		return channelWithError(err)
@@ -81,6 +85,16 @@ func (c *dydxClient) SubscribeCandles(ctx context.Context, symbol string, interv
 func (c *dydxClient) GetCandles(ctx context.Context, symbol string, interval CandleInterval, start, end time.Time) ([]Candle, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
+	}
+	if interval == CandleIntervalTick {
+		trades, err := c.getTickTrades(ctx, symbol, start, end)
+		if err != nil {
+			return nil, err
+		}
+		return tickCandles(symbol, trades), nil
+	}
+	if interval == CandleIntervalSecond {
+		return c.getSecondCandles(ctx, symbol, start, end)
 	}
 	resolution, err := dydxResolution(interval)
 	if err != nil {
@@ -120,6 +134,124 @@ func (c *dydxClient) GetCandles(ctx context.Context, symbol string, interval Can
 		})
 	}
 	return out, nil
+}
+
+func (c *dydxClient) getSecondCandles(ctx context.Context, symbol string, start, end time.Time) ([]Candle, error) {
+	trades, err := c.getTickTrades(ctx, symbol, start, end)
+	if err != nil {
+		return nil, err
+	}
+	return aggregateSecondCandles(symbol, trades), nil
+}
+
+func (c *dydxClient) getTickTrades(ctx context.Context, symbol string, start, end time.Time) ([]tradeTick, error) {
+	if symbol == "" {
+		return nil, ErrInvalidConfig
+	}
+	if end.IsZero() {
+		end = time.Now().UTC()
+	}
+	if start.IsZero() {
+		start = end.Add(-time.Second)
+	}
+	if end.Before(start) {
+		return nil, ErrInvalidConfig
+	}
+
+	cursor := end
+	trades := make([]tradeTick, 0)
+	for i := 0; i < 100; i++ {
+		param := &public.TradesParam{
+			MarketID:           symbol,
+			Limit:              100,
+			StartingBeforeOrAt: cursor.Format(time.RFC3339),
+		}
+		resp, err := c.client.Public.GetTrades(param)
+		if err != nil {
+			return nil, mapDydxError(err)
+		}
+		if len(resp.Trades) == 0 {
+			break
+		}
+
+		minTime := resp.Trades[0].CreatedAt
+		for _, t := range resp.Trades {
+			if t.CreatedAt.Before(minTime) {
+				minTime = t.CreatedAt
+			}
+			if t.CreatedAt.Before(start) || t.CreatedAt.After(end) {
+				continue
+			}
+			price, err := parseFloat(t.Price)
+			if err != nil {
+				continue
+			}
+			size, err := parseFloat(t.Size)
+			if err != nil {
+				continue
+			}
+			trades = append(trades, tradeTick{
+				Time:  t.CreatedAt,
+				Price: price,
+				Size:  size,
+			})
+		}
+		if minTime.Before(start) || len(resp.Trades) < 100 {
+			break
+		}
+		cursor = minTime.Add(-time.Nanosecond)
+	}
+
+	return trades, nil
+}
+
+func (c *dydxClient) subscribeTicks(ctx context.Context, symbol string) (<-chan Candle, <-chan error) {
+	if symbol == "" {
+		return channelWithError(ErrInvalidConfig)
+	}
+	out := make(chan Candle)
+	errs := make(chan error, 1)
+	go func() {
+		defer close(out)
+		defer close(errs)
+		last := time.Time{}
+		ticker := time.NewTicker(time.Second)
+		defer ticker.Stop()
+		for {
+			now := time.Now().UTC()
+			start := last
+			if start.IsZero() {
+				start = now.Add(-time.Second)
+			} else {
+				start = start.Add(time.Millisecond)
+			}
+			trades, err := c.getTickTrades(ctx, symbol, start, now)
+			if err != nil {
+				select {
+				case errs <- err:
+				default:
+				}
+			} else if len(trades) > 0 {
+				sort.Slice(trades, func(i, j int) bool {
+					return trades[i].Time.Before(trades[j].Time)
+				})
+				for _, candle := range tickCandles(symbol, trades) {
+					select {
+					case out <- candle:
+					case <-ctx.Done():
+						return
+					}
+				}
+				last = trades[len(trades)-1].Time
+			}
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+			}
+		}
+	}()
+	return out, errs
 }
 
 func (c *dydxClient) GetBalances(ctx context.Context) ([]Balance, error) {
@@ -171,10 +303,11 @@ func (c *dydxClient) ListOrders(ctx context.Context, symbol string, status Order
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	param := &private.OrderQueryParam{}
-	if symbol != "" {
-		param.Market = symbol
+	if symbol == "" {
+		return nil, ErrInvalidConfig
 	}
+	param := &private.OrderQueryParam{}
+	param.Market = symbol
 	if status != "" {
 		if filter, ok := dydxStatusFilter(status); ok {
 			param.Status = filter
@@ -200,6 +333,9 @@ func (c *dydxClient) PlaceOrder(ctx context.Context, req PlaceOrderRequest) (Ord
 		return Order{}, err
 	}
 	if req.Symbol == "" || req.Quantity == "" {
+		return Order{}, ErrInvalidConfig
+	}
+	if req.Type == OrderTypeLimit && req.Price == "" {
 		return Order{}, ErrInvalidConfig
 	}
 	positionID, err := c.positionID(ctx)
@@ -241,6 +377,9 @@ func (c *dydxClient) CancelOrder(ctx context.Context, symbol, orderID string) er
 	if err := ctx.Err(); err != nil {
 		return err
 	}
+	if symbol == "" {
+		return ErrInvalidConfig
+	}
 	_, err := c.client.Private.CancelOrder(orderID)
 	return mapDydxError(err)
 }
@@ -249,6 +388,9 @@ func (c *dydxClient) GetOrder(ctx context.Context, symbol, orderID string) (Orde
 	_ = symbol
 	if err := ctx.Err(); err != nil {
 		return Order{}, err
+	}
+	if symbol == "" {
+		return Order{}, ErrInvalidConfig
 	}
 	resp, err := c.client.Private.GetOrderById(orderID)
 	if err != nil {
@@ -319,7 +461,7 @@ func (c *dydxClient) positionID(ctx context.Context) (int64, error) {
 
 func dydxResolution(interval CandleInterval) (string, error) {
 	switch interval {
-	case CandleIntervalTick, CandleIntervalMinute:
+	case CandleIntervalMinute:
 		return types.Resolution1MIN, nil
 	case CandleIntervalHour:
 		return types.Resolution1HOUR, nil
@@ -332,10 +474,17 @@ func dydxResolution(interval CandleInterval) (string, error) {
 
 func mapDydxOrder(o private.Order) Order {
 	filled := ""
+	status := mapDydxStatus(o.Status)
 	if o.Size != "" && o.RemainingSize != "" {
 		if size, err := parseFloat(o.Size); err == nil {
 			if remaining, err := parseFloat(o.RemainingSize); err == nil {
-				filled = formatFloat(size - remaining)
+				if size >= remaining {
+					diff := size - remaining
+					filled = formatFloat(diff)
+					if status == OrderStatusNew && remaining > 0 && diff > 0 {
+						status = OrderStatusPartiallyFilled
+					}
+				}
 			}
 		}
 	}
@@ -344,7 +493,7 @@ func mapDydxOrder(o private.Order) Order {
 		Symbol:    o.Market,
 		Side:      mapDydxSideFromAPI(o.Side),
 		Type:      mapDydxTypeFromAPI(o.Type),
-		Status:    mapDydxStatus(o.Status),
+		Status:    status,
 		Quantity:  o.Size,
 		Filled:    filled,
 		Price:     o.Price,

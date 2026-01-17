@@ -2,18 +2,29 @@ package broker
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
 	"net/http"
+	"sort"
+	"strconv"
 	"strings"
 	"time"
 
-	"github.com/frankrap/bybit-api/rest"
+	bybit "github.com/bybit-exchange/bybit.go.api"
+	"github.com/bybit-exchange/bybit.go.api/models"
 )
 
-const bybitMainnetURL = "https://api.bybit.com/"
+const (
+	bybitMainnetURL      = bybit.MAINNET
+	bybitDefaultCategory = "linear"
+	bybitDefaultAccount  = "UNIFIED"
+)
 
 type bybitClient struct {
-	client *rest.ByBit
-	cfg    Config
+	client      *bybit.Client
+	cfg         Config
+	category    string
+	accountType string
 }
 
 func newBybit(cfg Config) (*bybitClient, error) {
@@ -21,9 +32,14 @@ func newBybit(cfg Config) (*bybitClient, error) {
 	if baseURL == "" {
 		baseURL = bybitMainnetURL
 	}
-	httpClient := &http.Client{Timeout: cfg.Timeout}
-	client := rest.New(httpClient, baseURL, cfg.APIKey, cfg.APISecret, false)
-	return &bybitClient{client: client, cfg: cfg}, nil
+	client := bybit.NewBybitHttpClient(cfg.APIKey, cfg.APISecret, bybit.WithBaseURL(baseURL))
+	client.HTTPClient = &http.Client{Timeout: cfg.Timeout}
+	return &bybitClient{
+		client:      client,
+		cfg:         cfg,
+		category:    bybitDefaultCategory,
+		accountType: bybitDefaultAccount,
+	}, nil
 }
 
 func (c *bybitClient) Name() ExchangeName {
@@ -35,6 +51,9 @@ func (c *bybitClient) Capabilities() Capabilities {
 }
 
 func (c *bybitClient) SubscribeCandles(ctx context.Context, symbol string, interval CandleInterval) (<-chan Candle, <-chan error) {
+	if interval == CandleIntervalTick {
+		return c.subscribeTicks(ctx, symbol)
+	}
 	dur, err := intervalDuration(interval)
 	if err != nil {
 		return channelWithError(err)
@@ -57,54 +76,239 @@ func (c *bybitClient) GetCandles(ctx context.Context, symbol string, interval Ca
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
+	if interval == CandleIntervalTick {
+		trades, err := c.getTickTrades(ctx, symbol, start, end)
+		if err != nil {
+			return nil, err
+		}
+		return tickCandles(symbol, trades), nil
+	}
+	if interval == CandleIntervalSecond {
+		return c.getSecondCandles(ctx, symbol, start, end)
+	}
 	bybitInterval, err := bybitInterval(interval)
 	if err != nil {
 		return nil, err
 	}
 	limit := estimateBybitLimit(start, end, interval)
-	if limit <= 0 {
-		limit = 200
+	params := map[string]interface{}{
+		"category": c.category,
+		"symbol":   symbol,
+		"interval": bybitInterval,
 	}
-	from := start.Unix()
-	_, _, klines, err := c.client.LinearGetKLine(symbol, bybitInterval, from, limit)
+	if !start.IsZero() {
+		params["start"] = start.UnixMilli()
+	}
+	if !end.IsZero() {
+		params["end"] = end.UnixMilli()
+	}
+	if limit > 0 {
+		params["limit"] = limit
+	}
+
+	resp, err := c.client.NewUtaBybitServiceWithParams(params).GetMarketKline(ctx)
 	if err != nil {
 		return nil, mapBybitError(err)
 	}
+	if err := bybitResponseError(resp); err != nil {
+		return nil, mapBybitError(err)
+	}
+	klines, err := parseBybitKlines(resp)
+	if err != nil {
+		return nil, mapBybitError(err)
+	}
+
 	out := make([]Candle, 0, len(klines))
 	for _, k := range klines {
+		ms, err := strconv.ParseInt(k.StartTime, 10, 64)
+		if err != nil {
+			continue
+		}
+		openTime := time.UnixMilli(ms)
 		out = append(out, Candle{
 			Symbol:    symbol,
 			Interval:  interval,
-			OpenTime:  time.Unix(k.OpenTime, 0),
-			CloseTime: time.Unix(k.OpenTime, 0).Add(mustDuration(interval)),
-			Open:      formatFloat(k.Open),
-			High:      formatFloat(k.High),
-			Low:       formatFloat(k.Low),
-			Close:     formatFloat(k.Close),
-			Volume:    formatFloat(k.Volume),
+			OpenTime:  openTime,
+			CloseTime: openTime.Add(mustDuration(interval)),
+			Open:      k.OpenPrice,
+			High:      k.HighPrice,
+			Low:       k.LowPrice,
+			Close:     k.ClosePrice,
+			Volume:    k.Volume,
+		})
+	}
+	if len(out) > 1 {
+		sort.Slice(out, func(i, j int) bool {
+			return out[i].OpenTime.Before(out[j].OpenTime)
 		})
 	}
 	return out, nil
+}
+
+func (c *bybitClient) getSecondCandles(ctx context.Context, symbol string, start, end time.Time) ([]Candle, error) {
+	trades, err := c.getTickTrades(ctx, symbol, start, end)
+	if err != nil {
+		return nil, err
+	}
+	return aggregateSecondCandles(symbol, trades), nil
+}
+
+func (c *bybitClient) getTickTrades(ctx context.Context, symbol string, start, end time.Time) ([]tradeTick, error) {
+	if symbol == "" {
+		return nil, ErrInvalidConfig
+	}
+	if end.IsZero() {
+		end = time.Now().UTC()
+	}
+	if start.IsZero() {
+		start = end.Add(-time.Second)
+	}
+	if end.Before(start) {
+		return nil, ErrInvalidConfig
+	}
+	params := map[string]interface{}{
+		"category": c.category,
+		"symbol":   symbol,
+		"limit":    1000,
+	}
+	resp, err := c.client.NewUtaBybitServiceWithParams(params).GetPublicRecentTrades(ctx)
+	if err != nil {
+		return nil, mapBybitError(err)
+	}
+	if err := bybitResponseError(resp); err != nil {
+		return nil, mapBybitError(err)
+	}
+
+	var result models.PublicRecentTradeHistory
+	if err := decodeBybitResult(resp, &result); err != nil {
+		return nil, mapBybitError(err)
+	}
+
+	trades := make([]tradeTick, 0, len(result.List))
+	for _, t := range result.List {
+		ts, err := parseBybitTradeTime(t.Time)
+		if err != nil {
+			continue
+		}
+		if ts.Before(start) || ts.After(end) {
+			continue
+		}
+		price, err := parseFloat(t.Price)
+		if err != nil {
+			continue
+		}
+		size, err := parseFloat(t.Size)
+		if err != nil {
+			continue
+		}
+		trades = append(trades, tradeTick{
+			Time:  ts,
+			Price: price,
+			Size:  size,
+		})
+	}
+	return trades, nil
+}
+
+func (c *bybitClient) subscribeTicks(ctx context.Context, symbol string) (<-chan Candle, <-chan error) {
+	if symbol == "" {
+		return channelWithError(ErrInvalidConfig)
+	}
+	out := make(chan Candle)
+	errs := make(chan error, 1)
+	go func() {
+		defer close(out)
+		defer close(errs)
+		last := time.Time{}
+		ticker := time.NewTicker(time.Second)
+		defer ticker.Stop()
+		for {
+			now := time.Now().UTC()
+			start := last
+			if start.IsZero() {
+				start = now.Add(-time.Second)
+			} else {
+				start = start.Add(time.Millisecond)
+			}
+			trades, err := c.getTickTrades(ctx, symbol, start, now)
+			if err != nil {
+				select {
+				case errs <- err:
+				default:
+				}
+			} else if len(trades) > 0 {
+				sort.Slice(trades, func(i, j int) bool {
+					return trades[i].Time.Before(trades[j].Time)
+				})
+				for _, candle := range tickCandles(symbol, trades) {
+					select {
+					case out <- candle:
+					case <-ctx.Done():
+						return
+					}
+				}
+				last = trades[len(trades)-1].Time
+			}
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+			}
+		}
+	}()
+	return out, errs
 }
 
 func (c *bybitClient) GetBalances(ctx context.Context) ([]Balance, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	coins := []string{"BTC", "ETH", "EOS", "XRP", "USDT"}
-	out := make([]Balance, 0, len(coins))
-	for _, coin := range coins {
-		_, _, bal, err := c.client.GetWalletBalance(coin)
-		if err != nil {
-			return nil, mapBybitError(err)
+	params := map[string]interface{}{"accountType": c.accountType}
+	resp, err := c.client.NewUtaBybitServiceWithParams(params).GetAccountWallet(ctx)
+	if err != nil {
+		return nil, mapBybitError(err)
+	}
+	if err := bybitResponseError(resp); err != nil {
+		return nil, mapBybitError(err)
+	}
+
+	var payload struct {
+		List []struct {
+			AccountType string            `json:"accountType"`
+			Coins       []models.CoinInfo `json:"coin"`
+		} `json:"list"`
+	}
+	if err := decodeBybitResult(resp, &payload); err != nil {
+		return nil, mapBybitError(err)
+	}
+
+	out := make([]Balance, 0)
+	for _, account := range payload.List {
+		_ = account
+		for _, coin := range account.Coins {
+			free := coin.Free
+			if free == "" {
+				free = coin.AvailableToWithdraw
+			}
+			locked := coin.Locked
+			total := coin.WalletBalance
+			if locked == "" && total != "" && free != "" {
+				if tf, err := parseFloat(total); err == nil {
+					if ff, err := parseFloat(free); err == nil && tf >= ff {
+						locked = formatFloat(tf - ff)
+					}
+				}
+			}
+			if total == "" {
+				total = sumStrings(free, locked)
+			}
+			out = append(out, Balance{
+				Asset:  coin.Coin,
+				Free:   free,
+				Locked: locked,
+				Total:  total,
+			})
 		}
-		locked := bal.WalletBalance - bal.AvailableBalance
-		out = append(out, Balance{
-			Asset:  coin,
-			Free:   formatFloat(bal.AvailableBalance),
-			Locked: formatFloat(locked),
-			Total:  formatFloat(bal.WalletBalance),
-		})
 	}
 	return out, nil
 }
@@ -113,16 +317,26 @@ func (c *bybitClient) ListOpenOrders(ctx context.Context, symbol string) ([]Orde
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	if symbol == "" {
-		return nil, ErrNotSupported
+	params := map[string]interface{}{"category": c.category}
+	if symbol != "" {
+		params["symbol"] = symbol
 	}
-	_, _, orders, err := c.client.LinearGetActiveOrders(symbol)
+	resp, err := c.client.NewUtaBybitServiceWithParams(params).GetOpenOrders(ctx)
 	if err != nil {
 		return nil, mapBybitError(err)
 	}
-	out := make([]Order, 0, len(orders.Result))
-	for _, o := range orders.Result {
-		out = append(out, mapBybitOrder(o))
+	if err := bybitResponseError(resp); err != nil {
+		return nil, mapBybitError(err)
+	}
+
+	var result models.OpenOrdersInfo
+	if err := decodeBybitResult(resp, &result); err != nil {
+		return nil, mapBybitError(err)
+	}
+
+	out := make([]Order, 0, len(result.List))
+	for _, o := range result.List {
+		out = append(out, mapBybitOrderInfo(o))
 	}
 	return out, nil
 }
@@ -132,16 +346,28 @@ func (c *bybitClient) ListOrders(ctx context.Context, symbol string, status Orde
 		return nil, err
 	}
 	if symbol == "" {
-		return nil, ErrNotSupported
+		return nil, ErrInvalidConfig
 	}
-	filter := bybitStatusFilter(status)
-	_, _, result, err := c.client.LinearGetOrders(symbol, filter, 50, 1)
+	params := map[string]interface{}{"category": c.category}
+	params["symbol"] = symbol
+	resp, err := c.client.NewUtaBybitServiceWithParams(params).GetOrderHistory(ctx)
 	if err != nil {
 		return nil, mapBybitError(err)
 	}
-	out := make([]Order, 0, len(result.Data))
-	for _, o := range result.Data {
-		mapped := mapBybitOrder(o)
+	if err := bybitResponseError(resp); err != nil {
+		return nil, mapBybitError(err)
+	}
+
+	var result struct {
+		List []models.OrderInfo `json:"list"`
+	}
+	if err := decodeBybitResult(resp, &result); err != nil {
+		return nil, mapBybitError(err)
+	}
+
+	out := make([]Order, 0, len(result.List))
+	for _, o := range result.List {
+		mapped := mapBybitOrderInfo(o)
 		if status != "" && mapped.Status != status {
 			continue
 		}
@@ -157,35 +383,106 @@ func (c *bybitClient) PlaceOrder(ctx context.Context, req PlaceOrderRequest) (Or
 	if req.Symbol == "" || req.Quantity == "" {
 		return Order{}, ErrInvalidConfig
 	}
-	bybitSide := mapBybitSide(req.Side)
-	bybitType := mapBybitType(req.Type)
-	quantity := mustFloat(req.Quantity)
-	price := mustFloat(req.Price)
-	timeInForce := mapBybitTimeInForce(req.TimeInForce)
-	_, _, order, err := c.client.LinearCreateOrder(bybitSide, bybitType, price, quantity, timeInForce, 0, 0, req.ReduceOnly, false, req.ClientOrderID, req.Symbol)
+	if req.Type == OrderTypeLimit && req.Price == "" {
+		return Order{}, ErrInvalidConfig
+	}
+	order := c.client.NewPlaceOrderService(
+		c.category,
+		req.Symbol,
+		mapBybitSide(req.Side),
+		mapBybitType(req.Type),
+		req.Quantity,
+	)
+	if req.Price != "" {
+		order.Price(req.Price)
+	}
+	if req.TimeInForce != "" {
+		order.TimeInForce(mapBybitTimeInForce(req.TimeInForce))
+	}
+	if req.ClientOrderID != "" {
+		order.OrderLinkId(req.ClientOrderID)
+	}
+	if req.ReduceOnly {
+		order.ReduceOnly(true)
+	}
+	resp, err := order.Do(ctx)
 	if err != nil {
 		return Order{}, mapBybitError(err)
 	}
-	return mapBybitOrder(order), nil
+	if err := bybitResponseError(resp); err != nil {
+		return Order{}, mapBybitError(err)
+	}
+
+	var result models.OrderResult
+	if err := decodeBybitResult(resp, &result); err != nil {
+		return Order{}, mapBybitError(err)
+	}
+
+	return Order{
+		ID:        result.OrderId,
+		Symbol:    req.Symbol,
+		Side:      req.Side,
+		Type:      req.Type,
+		Status:    OrderStatusNew,
+		Quantity:  req.Quantity,
+		Price:     req.Price,
+		CreatedAt: time.Now().UTC(),
+		UpdatedAt: time.Now().UTC(),
+	}, nil
 }
 
 func (c *bybitClient) CancelOrder(ctx context.Context, symbol, orderID string) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	_, _, _, err := c.client.LinearCancelOrder(orderID, "", symbol)
-	return mapBybitError(err)
+	if symbol == "" {
+		return ErrInvalidConfig
+	}
+	params := map[string]interface{}{
+		"category": c.category,
+		"symbol":   symbol,
+		"orderId":  orderID,
+	}
+	resp, err := c.client.NewUtaBybitServiceWithParams(params).CancelOrder(ctx)
+	if err != nil {
+		return mapBybitError(err)
+	}
+	if err := bybitResponseError(resp); err != nil {
+		return mapBybitError(err)
+	}
+	return nil
 }
 
 func (c *bybitClient) GetOrder(ctx context.Context, symbol, orderID string) (Order, error) {
 	if err := ctx.Err(); err != nil {
 		return Order{}, err
 	}
-	_, _, orderResp, err := c.client.LinearGetActiveOrder(symbol, orderID, "")
+	if symbol == "" {
+		return Order{}, ErrInvalidConfig
+	}
+	params := map[string]interface{}{
+		"category": c.category,
+		"symbol":   symbol,
+		"orderId":  orderID,
+	}
+	resp, err := c.client.NewUtaBybitServiceWithParams(params).GetOrderHistory(ctx)
 	if err != nil {
 		return Order{}, mapBybitError(err)
 	}
-	return mapBybitOrder(orderResp.Result), nil
+	if err := bybitResponseError(resp); err != nil {
+		return Order{}, mapBybitError(err)
+	}
+
+	var result struct {
+		List []models.OrderInfo `json:"list"`
+	}
+	if err := decodeBybitResult(resp, &result); err != nil {
+		return Order{}, mapBybitError(err)
+	}
+	if len(result.List) == 0 {
+		return Order{}, ErrOrderNotFound
+	}
+	return mapBybitOrderInfo(result.List[0]), nil
 }
 
 func (c *bybitClient) Ping(ctx context.Context) error {
@@ -197,16 +494,32 @@ func (c *bybitClient) ServerTime(ctx context.Context) (time.Time, error) {
 	if err := ctx.Err(); err != nil {
 		return time.Time{}, err
 	}
-	_, _, ms, err := c.client.GetServerTime()
+	resp, err := c.client.NewUtaBybitServiceNoParams().GetServerTime(ctx)
 	if err != nil {
 		return time.Time{}, mapBybitError(err)
 	}
-	return time.UnixMilli(ms), nil
+	if err := bybitResponseError(resp); err != nil {
+		return time.Time{}, mapBybitError(err)
+	}
+
+	var result models.GetServerTimeResponse
+	if err := decodeBybitFull(resp, &result); err != nil {
+		return time.Time{}, mapBybitError(err)
+	}
+	sec, err := strconv.ParseInt(result.Result.TimeSecond, 10, 64)
+	if err == nil && sec > 0 {
+		return time.Unix(sec, 0), nil
+	}
+	nano, err := strconv.ParseInt(result.Result.TimeNano, 10, 64)
+	if err == nil && nano > 0 {
+		return time.Unix(0, nano), nil
+	}
+	return time.Time{}, errors.New("bybit: invalid server time")
 }
 
 func bybitInterval(interval CandleInterval) (string, error) {
 	switch interval {
-	case CandleIntervalTick, CandleIntervalMinute:
+	case CandleIntervalMinute:
 		return "1", nil
 	case CandleIntervalHour:
 		return "60", nil
@@ -217,12 +530,13 @@ func bybitInterval(interval CandleInterval) (string, error) {
 	}
 }
 
-func mapBybitOrder(o rest.Order) Order {
-	avgPrice := ""
-	if o.CumExecQty.String() != "" && o.CumExecValue.String() != "" {
-		qty, err := parseFloat(o.CumExecQty.String())
-		if err == nil && qty > 0 {
-			if quote, err := parseFloat(o.CumExecValue.String()); err == nil {
+func mapBybitOrderInfo(o models.OrderInfo) Order {
+	createdAt := parseBybitTime(o.CreatedTime)
+	updatedAt := parseBybitTime(o.UpdatedTime)
+	avgPrice := o.AvgPrice
+	if avgPrice == "" && o.CumExecQty != "" && o.CumExecValue != "" {
+		if qty, err := parseFloat(o.CumExecQty); err == nil && qty > 0 {
+			if quote, err := parseFloat(o.CumExecValue); err == nil {
 				avgPrice = formatFloat(quote / qty)
 			}
 		}
@@ -233,18 +547,18 @@ func mapBybitOrder(o rest.Order) Order {
 		Side:      mapBybitSideFromAPI(o.Side),
 		Type:      mapBybitTypeFromAPI(o.OrderType),
 		Status:    mapBybitStatus(o.OrderStatus),
-		Quantity:  o.Qty.String(),
-		Filled:    o.CumExecQty.String(),
-		Price:     o.Price.String(),
+		Quantity:  o.Qty,
+		Filled:    o.CumExecQty,
+		Price:     o.Price,
 		AvgPrice:  avgPrice,
-		CreatedAt: o.CreatedAt,
-		UpdatedAt: o.UpdatedAt,
+		CreatedAt: createdAt,
+		UpdatedAt: updatedAt,
 	}
 }
 
 func mapBybitStatus(status string) OrderStatus {
 	switch strings.ToUpper(status) {
-	case "NEW", "CREATED":
+	case "CREATED", "NEW":
 		return OrderStatusNew
 	case "PARTIALLYFILLED", "PARTIALLY_FILLED":
 		return OrderStatusPartiallyFilled
@@ -256,23 +570,6 @@ func mapBybitStatus(status string) OrderStatus {
 		return OrderStatusRejected
 	default:
 		return OrderStatusRejected
-	}
-}
-
-func bybitStatusFilter(status OrderStatus) string {
-	switch status {
-	case OrderStatusNew:
-		return "Created,New"
-	case OrderStatusPartiallyFilled:
-		return "PartiallyFilled"
-	case OrderStatusFilled:
-		return "Filled"
-	case OrderStatusCanceled:
-		return "Cancelled"
-	case OrderStatusRejected:
-		return "Rejected"
-	default:
-		return ""
 	}
 }
 
@@ -307,16 +604,95 @@ func mapBybitTypeFromAPI(orderType string) OrderType {
 func mapBybitTimeInForce(tif TimeInForce) string {
 	switch tif {
 	case TimeInForceIOC:
-		return "ImmediateOrCancel"
+		return "IOC"
 	case TimeInForceFOK:
-		return "FillOrKill"
+		return "FOK"
 	default:
-		return "GoodTillCancel"
+		return "GTC"
 	}
 }
 
 func mapBybitError(err error) error {
 	return mapCommonError(err)
+}
+
+func bybitResponseError(resp *bybit.ServerResponse) error {
+	if resp == nil {
+		return errors.New("bybit: empty response")
+	}
+	if resp.RetCode != 0 {
+		if resp.RetMsg == "" {
+			return errors.New("bybit: request failed")
+		}
+		return errors.New("bybit: " + resp.RetMsg)
+	}
+	return nil
+}
+
+func decodeBybitResult(resp *bybit.ServerResponse, out interface{}) error {
+	if resp == nil {
+		return errors.New("bybit: empty response")
+	}
+	data, err := json.Marshal(resp.Result)
+	if err != nil {
+		return err
+	}
+	return json.Unmarshal(data, out)
+}
+
+func decodeBybitFull(resp *bybit.ServerResponse, out interface{}) error {
+	if resp == nil {
+		return errors.New("bybit: empty response")
+	}
+	data, err := json.Marshal(resp)
+	if err != nil {
+		return err
+	}
+	return json.Unmarshal(data, out)
+}
+
+func parseBybitKlines(resp *bybit.ServerResponse) ([]*models.MarketKlineCandle, error) {
+	data, err := json.Marshal(resp)
+	if err != nil {
+		return nil, err
+	}
+	res, _, err := bybit.GetMarketKlineResponse(nil, data, nil)
+	if err != nil {
+		return nil, err
+	}
+	if res == nil {
+		return nil, errors.New("bybit: empty kline response")
+	}
+	return res.List, nil
+}
+
+func parseBybitTime(val string) time.Time {
+	val = strings.TrimSpace(val)
+	if val == "" {
+		return time.Time{}
+	}
+	if ms, err := strconv.ParseInt(val, 10, 64); err == nil {
+		if ms > 1e12 {
+			return time.UnixMilli(ms)
+		}
+		return time.Unix(ms, 0)
+	}
+	return time.Time{}
+}
+
+func parseBybitTradeTime(val string) (time.Time, error) {
+	val = strings.TrimSpace(val)
+	if val == "" {
+		return time.Time{}, errors.New("bybit: empty trade time")
+	}
+	ms, err := strconv.ParseInt(val, 10, 64)
+	if err != nil {
+		return time.Time{}, err
+	}
+	if ms > 1e12 {
+		return time.UnixMilli(ms), nil
+	}
+	return time.Unix(ms, 0), nil
 }
 
 func estimateBybitLimit(start, end time.Time, interval CandleInterval) int {
@@ -346,9 +722,4 @@ func mustDuration(interval CandleInterval) time.Duration {
 		return 0
 	}
 	return dur
-}
-
-func mustFloat(val string) float64 {
-	f, _ := parseFloat(val)
-	return f
 }

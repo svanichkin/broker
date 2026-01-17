@@ -3,6 +3,7 @@ package broker
 import (
 	"context"
 	"net/http"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -34,6 +35,9 @@ func (c *binanceClient) Capabilities() Capabilities {
 }
 
 func (c *binanceClient) SubscribeCandles(ctx context.Context, symbol string, interval CandleInterval) (<-chan Candle, <-chan error) {
+	if interval == CandleIntervalTick {
+		return c.subscribeTicks(ctx, symbol)
+	}
 	dur, err := intervalDuration(interval)
 	if err != nil {
 		return channelWithError(err)
@@ -53,6 +57,16 @@ func (c *binanceClient) SubscribeCandles(ctx context.Context, symbol string, int
 }
 
 func (c *binanceClient) GetCandles(ctx context.Context, symbol string, interval CandleInterval, start, end time.Time) ([]Candle, error) {
+	if interval == CandleIntervalTick {
+		trades, err := c.getTickTrades(ctx, symbol, start, end)
+		if err != nil {
+			return nil, err
+		}
+		return tickCandles(symbol, trades), nil
+	}
+	if interval == CandleIntervalSecond {
+		return c.getSecondCandles(ctx, symbol, start, end)
+	}
 	binanceInterval, err := binanceInterval(interval)
 	if err != nil {
 		return nil, err
@@ -88,6 +102,117 @@ func (c *binanceClient) GetCandles(ctx context.Context, symbol string, interval 
 		})
 	}
 	return out, nil
+}
+
+func (c *binanceClient) getSecondCandles(ctx context.Context, symbol string, start, end time.Time) ([]Candle, error) {
+	trades, err := c.getTickTrades(ctx, symbol, start, end)
+	if err != nil {
+		return nil, err
+	}
+	return aggregateSecondCandles(symbol, trades), nil
+}
+
+func (c *binanceClient) getTickTrades(ctx context.Context, symbol string, start, end time.Time) ([]tradeTick, error) {
+	if symbol == "" {
+		return nil, ErrInvalidConfig
+	}
+	if end.IsZero() {
+		end = time.Now().UTC()
+	}
+	if start.IsZero() {
+		start = end.Add(-time.Second)
+	}
+	if end.Before(start) {
+		return nil, ErrInvalidConfig
+	}
+	startMs := start.UnixMilli()
+	endMs := end.UnixMilli()
+	trades := make([]tradeTick, 0)
+
+	for {
+		service := c.client.NewAggTradesService().Symbol(symbol).StartTime(startMs).EndTime(endMs).Limit(1000)
+		aggTrades, err := service.Do(ctx)
+		if err != nil {
+			return nil, mapBinanceError(err)
+		}
+		if len(aggTrades) == 0 {
+			break
+		}
+		for _, t := range aggTrades {
+			if t.Timestamp < startMs || t.Timestamp > endMs {
+				continue
+			}
+			price, err := parseFloat(t.Price)
+			if err != nil {
+				continue
+			}
+			size, err := parseFloat(t.Quantity)
+			if err != nil {
+				continue
+			}
+			trades = append(trades, tradeTick{
+				Time:  time.UnixMilli(t.Timestamp),
+				Price: price,
+				Size:  size,
+			})
+		}
+		lastTs := aggTrades[len(aggTrades)-1].Timestamp
+		if len(aggTrades) < 1000 || lastTs >= endMs || lastTs <= startMs {
+			break
+		}
+		startMs = lastTs + 1
+	}
+
+	return trades, nil
+}
+
+func (c *binanceClient) subscribeTicks(ctx context.Context, symbol string) (<-chan Candle, <-chan error) {
+	if symbol == "" {
+		return channelWithError(ErrInvalidConfig)
+	}
+	out := make(chan Candle)
+	errs := make(chan error, 1)
+	go func() {
+		defer close(out)
+		defer close(errs)
+		last := time.Time{}
+		ticker := time.NewTicker(time.Second)
+		defer ticker.Stop()
+		for {
+			now := time.Now().UTC()
+			start := last
+			if start.IsZero() {
+				start = now.Add(-time.Second)
+			} else {
+				start = start.Add(time.Millisecond)
+			}
+			trades, err := c.getTickTrades(ctx, symbol, start, now)
+			if err != nil {
+				select {
+				case errs <- err:
+				default:
+				}
+			} else if len(trades) > 0 {
+				sort.Slice(trades, func(i, j int) bool {
+					return trades[i].Time.Before(trades[j].Time)
+				})
+				for _, candle := range tickCandles(symbol, trades) {
+					select {
+					case out <- candle:
+					case <-ctx.Done():
+						return
+					}
+				}
+				last = trades[len(trades)-1].Time
+			}
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+			}
+		}
+	}()
+	return out, errs
 }
 
 func (c *binanceClient) GetBalances(ctx context.Context) ([]Balance, error) {
@@ -126,7 +251,7 @@ func (c *binanceClient) ListOpenOrders(ctx context.Context, symbol string) ([]Or
 
 func (c *binanceClient) ListOrders(ctx context.Context, symbol string, status OrderStatus) ([]Order, error) {
 	if symbol == "" {
-		return nil, ErrNotSupported
+		return nil, ErrInvalidConfig
 	}
 	service := c.client.NewListOrdersService().Symbol(symbol)
 	orders, err := service.Do(ctx)
@@ -176,6 +301,9 @@ func (c *binanceClient) PlaceOrder(ctx context.Context, req PlaceOrderRequest) (
 }
 
 func (c *binanceClient) CancelOrder(ctx context.Context, symbol, orderID string) error {
+	if symbol == "" {
+		return ErrInvalidConfig
+	}
 	service := c.client.NewCancelOrderService().Symbol(symbol)
 	if id, err := strconv.ParseInt(orderID, 10, 64); err == nil {
 		service.OrderID(id)
@@ -187,6 +315,9 @@ func (c *binanceClient) CancelOrder(ctx context.Context, symbol, orderID string)
 }
 
 func (c *binanceClient) GetOrder(ctx context.Context, symbol, orderID string) (Order, error) {
+	if symbol == "" {
+		return Order{}, ErrInvalidConfig
+	}
 	service := c.client.NewGetOrderService().Symbol(symbol)
 	if id, err := strconv.ParseInt(orderID, 10, 64); err == nil {
 		service.OrderID(id)
@@ -214,7 +345,7 @@ func (c *binanceClient) ServerTime(ctx context.Context) (time.Time, error) {
 
 func binanceInterval(interval CandleInterval) (string, error) {
 	switch interval {
-	case CandleIntervalTick, CandleIntervalMinute:
+	case CandleIntervalMinute:
 		return "1m", nil
 	case CandleIntervalHour:
 		return "1h", nil

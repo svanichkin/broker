@@ -23,6 +23,7 @@ type CandleInterval string
 
 const (
 	CandleIntervalTick   CandleInterval = "tick"
+	CandleIntervalSecond CandleInterval = "1s"
 	CandleIntervalMinute CandleInterval = "1m"
 	CandleIntervalHour   CandleInterval = "1h"
 	CandleIntervalDay    CandleInterval = "1d"

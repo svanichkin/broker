@@ -113,6 +113,7 @@ const (
 type CandleInterval string
 const (
 	CandleIntervalTick   CandleInterval = "tick"
+	CandleIntervalSecond CandleInterval = "1s"
 	CandleIntervalMinute CandleInterval = "1m"
 	CandleIntervalHour   CandleInterval = "1h"
 	CandleIntervalDay    CandleInterval = "1d"
@@ -339,8 +340,9 @@ The adapters map SDK errors to these where possible.
 
 ## Candle intervals
 
-Supported intervals:
-- `CandleIntervalTick`
+Available enum values:
+- `CandleIntervalTick` (trade ticks from recent trades)
+- `CandleIntervalSecond` (1s candles from aggregated trades)
 - `CandleIntervalMinute`
 - `CandleIntervalHour`
 - `CandleIntervalDay`
@@ -349,8 +351,9 @@ Supported intervals:
 
 - Symbol format must match the target exchange (e.g. `BTCUSDT` for Binance/Bybit, `BTC-USD` for dYdX).
 - `SubscribeCandles` uses REST polling under the hood (no websocket stream).
-- Bybit open orders require a `symbol` (`ListOpenOrders` returns `ErrNotSupported` if empty).
-- Binance/Bybit order history requires a `symbol` (`ListOrders` returns `ErrNotSupported` if empty).
+- Tick and 1s candles are derived from recent trades and may be incomplete for large historical ranges.
+- `ListOrders`, `GetOrder`, and `CancelOrder` return `ErrInvalidConfig` if `symbol` is empty.
+- `ListOrders`, `GetOrder`, and `CancelOrder` require a non-empty `symbol` across all adapters.
 - dYdX balances are returned as a single USDC-like asset derived from account equity/collateral.
 
 ## Tests

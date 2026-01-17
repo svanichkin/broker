@@ -127,6 +127,29 @@ func (c *bybitClient) ListOpenOrders(ctx context.Context, symbol string) ([]Orde
 	return out, nil
 }
 
+func (c *bybitClient) ListOrders(ctx context.Context, symbol string, status OrderStatus) ([]Order, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if symbol == "" {
+		return nil, ErrNotSupported
+	}
+	filter := bybitStatusFilter(status)
+	_, _, result, err := c.client.LinearGetOrders(symbol, filter, 50, 1)
+	if err != nil {
+		return nil, mapBybitError(err)
+	}
+	out := make([]Order, 0, len(result.Data))
+	for _, o := range result.Data {
+		mapped := mapBybitOrder(o)
+		if status != "" && mapped.Status != status {
+			continue
+		}
+		out = append(out, mapped)
+	}
+	return out, nil
+}
+
 func (c *bybitClient) PlaceOrder(ctx context.Context, req PlaceOrderRequest) (Order, error) {
 	if err := ctx.Err(); err != nil {
 		return Order{}, err
@@ -233,6 +256,23 @@ func mapBybitStatus(status string) OrderStatus {
 		return OrderStatusRejected
 	default:
 		return OrderStatusRejected
+	}
+}
+
+func bybitStatusFilter(status OrderStatus) string {
+	switch status {
+	case OrderStatusNew:
+		return "Created,New"
+	case OrderStatusPartiallyFilled:
+		return "PartiallyFilled"
+	case OrderStatusFilled:
+		return "Filled"
+	case OrderStatusCanceled:
+		return "Cancelled"
+	case OrderStatusRejected:
+		return "Rejected"
+	default:
+		return ""
 	}
 }
 

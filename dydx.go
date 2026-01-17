@@ -167,6 +167,34 @@ func (c *dydxClient) ListOpenOrders(ctx context.Context, symbol string) ([]Order
 	return out, nil
 }
 
+func (c *dydxClient) ListOrders(ctx context.Context, symbol string, status OrderStatus) ([]Order, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	param := &private.OrderQueryParam{}
+	if symbol != "" {
+		param.Market = symbol
+	}
+	if status != "" {
+		if filter, ok := dydxStatusFilter(status); ok {
+			param.Status = filter
+		}
+	}
+	resp, err := c.client.Private.GetOrders(param)
+	if err != nil {
+		return nil, mapDydxError(err)
+	}
+	out := make([]Order, 0, len(resp.Orders))
+	for _, o := range resp.Orders {
+		mapped := mapDydxOrder(o)
+		if status != "" && mapped.Status != status {
+			continue
+		}
+		out = append(out, mapped)
+	}
+	return out, nil
+}
+
 func (c *dydxClient) PlaceOrder(ctx context.Context, req PlaceOrderRequest) (Order, error) {
 	if err := ctx.Err(); err != nil {
 		return Order{}, err
@@ -338,6 +366,19 @@ func mapDydxStatus(status string) OrderStatus {
 		return OrderStatusNew
 	default:
 		return OrderStatusRejected
+	}
+}
+
+func dydxStatusFilter(status OrderStatus) (string, bool) {
+	switch status {
+	case OrderStatusNew, OrderStatusPartiallyFilled:
+		return types.OrderStatusOpen, true
+	case OrderStatusFilled:
+		return types.OrderStatusFilled, true
+	case OrderStatusCanceled:
+		return types.OrderStatusCanceled, true
+	default:
+		return "", false
 	}
 }
 

@@ -124,6 +124,26 @@ func (c *binanceClient) ListOpenOrders(ctx context.Context, symbol string) ([]Or
 	return out, nil
 }
 
+func (c *binanceClient) ListOrders(ctx context.Context, symbol string, status OrderStatus) ([]Order, error) {
+	if symbol == "" {
+		return nil, ErrNotSupported
+	}
+	service := c.client.NewListOrdersService().Symbol(symbol)
+	orders, err := service.Do(ctx)
+	if err != nil {
+		return nil, mapBinanceError(err)
+	}
+	out := make([]Order, 0, len(orders))
+	for _, o := range orders {
+		mapped := mapBinanceOrder(o)
+		if status != "" && mapped.Status != status {
+			continue
+		}
+		out = append(out, mapped)
+	}
+	return out, nil
+}
+
 func (c *binanceClient) PlaceOrder(ctx context.Context, req PlaceOrderRequest) (Order, error) {
 	if req.Symbol == "" || req.Quantity == "" {
 		return Order{}, ErrInvalidConfig

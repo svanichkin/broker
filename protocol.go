@@ -128,6 +128,7 @@ type Exchange interface {
 
 	GetBalances(ctx context.Context) ([]Balance, error)
 	ListOpenOrders(ctx context.Context, symbol string) ([]Order, error)
+	ListOrders(ctx context.Context, symbol string, status OrderStatus) ([]Order, error)
 	PlaceOrder(ctx context.Context, req PlaceOrderRequest) (Order, error)
 	CancelOrder(ctx context.Context, symbol, orderID string) error
 	GetOrder(ctx context.Context, symbol, orderID string) (Order, error)

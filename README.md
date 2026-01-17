@@ -88,6 +88,7 @@ type Exchange interface {
 
 	GetBalances(ctx context.Context) ([]Balance, error)
 	ListOpenOrders(ctx context.Context, symbol string) ([]Order, error)
+	ListOrders(ctx context.Context, symbol string, status OrderStatus) ([]Order, error)
 	PlaceOrder(ctx context.Context, req PlaceOrderRequest) (Order, error)
 	CancelOrder(ctx context.Context, symbol, orderID string) error
 	GetOrder(ctx context.Context, symbol, orderID string) (Order, error)
@@ -96,6 +97,152 @@ type Exchange interface {
 	ServerTime(ctx context.Context) (time.Time, error)
 }
 ```
+
+## API reference
+
+### Enums
+
+```go
+type ExchangeName string
+const (
+	ExchangeBinance ExchangeName = "Binance"
+	ExchangeBybit   ExchangeName = "Bybit"
+	ExchangeDydx    ExchangeName = "Dydx"
+)
+
+type CandleInterval string
+const (
+	CandleIntervalTick   CandleInterval = "tick"
+	CandleIntervalMinute CandleInterval = "1m"
+	CandleIntervalHour   CandleInterval = "1h"
+	CandleIntervalDay    CandleInterval = "1d"
+)
+
+type OrderStatus string
+const (
+	OrderStatusNew             OrderStatus = "NEW"
+	OrderStatusPartiallyFilled OrderStatus = "PARTIALLY_FILLED"
+	OrderStatusFilled          OrderStatus = "FILLED"
+	OrderStatusCanceled        OrderStatus = "CANCELED"
+	OrderStatusRejected        OrderStatus = "REJECTED"
+)
+
+type OrderSide string
+const (
+	OrderSideBuy  OrderSide = "BUY"
+	OrderSideSell OrderSide = "SELL"
+)
+
+type OrderType string
+const (
+	OrderTypeLimit  OrderType = "LIMIT"
+	OrderTypeMarket OrderType = "MARKET"
+)
+
+type TimeInForce string
+const (
+	TimeInForceGTC TimeInForce = "GTC"
+	TimeInForceIOC TimeInForce = "IOC"
+	TimeInForceFOK TimeInForce = "FOK"
+)
+```
+
+### Structs
+
+```go
+type Capabilities struct {
+	Spot        bool
+	Derivatives bool
+	Streaming   bool
+}
+
+type Config struct {
+	Exchange   ExchangeName // required
+	APIKey     string
+	APISecret  string
+	Passphrase string        // dYdX only
+	BaseURL    string        // optional override
+	Timeout    time.Duration // default 10s
+
+	// dYdX-only fields
+	EthereumAddress          string
+	StarkPublicKey           string
+	StarkPrivateKey          string
+	StarkPublicKeyYCoordinate string
+}
+
+type PlaceOrderRequest struct {
+	Symbol        string      // required
+	Side          OrderSide    // BUY/SELL
+	Type          OrderType    // LIMIT/MARKET
+	Quantity      string      // required
+	Price         string      // required for LIMIT
+	TimeInForce   TimeInForce // GTC/IOC/FOK (LIMIT only)
+	ClientOrderID string      // optional
+	ReduceOnly    bool        // derivatives only
+}
+
+type Order struct {
+	ID        string
+	Symbol    string
+	Side      OrderSide
+	Type      OrderType
+	Status    OrderStatus
+	Quantity  string
+	Filled    string
+	Price     string
+	AvgPrice  string
+	CreatedAt time.Time
+	UpdatedAt time.Time
+}
+
+type Balance struct {
+	Asset  string
+	Free   string
+	Locked string
+	Total  string
+}
+
+type Candle struct {
+	Symbol    string
+	Interval  CandleInterval
+	OpenTime  time.Time
+	CloseTime time.Time
+	Open      string
+	High      string
+	Low       string
+	Close     string
+	Volume    string
+	Trades    string
+}
+```
+
+### Methods
+
+- `Name() ExchangeName`  
+  Returns the exchange identifier.
+- `Capabilities() Capabilities`  
+  Describes spot/derivatives/streaming support.
+- `SubscribeCandles(ctx, symbol, interval)`  
+  Returns two channels. Candles are delivered via polling. The error channel is buffered and may report intermittent issues.
+- `GetCandles(ctx, symbol, interval, start, end)`  
+  Loads historical candles in the given time range (inclusive bounds are exchange-dependent).
+- `GetBalances(ctx)`  
+  Returns unified balances for the account.
+- `ListOpenOrders(ctx, symbol)`  
+  Returns open orders. Some exchanges require a non-empty symbol.
+- `ListOrders(ctx, symbol, status)`  
+  Returns order history, optionally filtered by unified status. Pass `status == ""` to disable filtering.
+- `PlaceOrder(ctx, req)`  
+  Places a new order and returns the unified `Order`.
+- `CancelOrder(ctx, symbol, orderID)`  
+  Cancels by exchange order ID or client order ID (Binance).
+- `GetOrder(ctx, symbol, orderID)`  
+  Returns a single order by ID.
+- `Ping(ctx)`  
+  Health check.
+- `ServerTime(ctx)`  
+  Returns exchange server time.
 
 ## Examples
 
@@ -126,6 +273,16 @@ if err != nil {
 	panic(err)
 }
 fmt.Println("order id:", order.ID)
+```
+
+### Order history
+
+```go
+orders, err := ex.ListOrders(ctx, "BTCUSDT", broker.OrderStatusFilled)
+if err != nil {
+	panic(err)
+}
+fmt.Println("filled orders:", len(orders))
 ```
 
 ### Cancel and get order
@@ -190,8 +347,10 @@ Supported intervals:
 
 ## Notes and limitations
 
+- Symbol format must match the target exchange (e.g. `BTCUSDT` for Binance/Bybit, `BTC-USD` for dYdX).
 - `SubscribeCandles` uses REST polling under the hood (no websocket stream).
 - Bybit open orders require a `symbol` (`ListOpenOrders` returns `ErrNotSupported` if empty).
+- Binance/Bybit order history requires a `symbol` (`ListOrders` returns `ErrNotSupported` if empty).
 - dYdX balances are returned as a single USDC-like asset derived from account equity/collateral.
 
 ## Tests

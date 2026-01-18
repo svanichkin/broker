@@ -90,57 +90,68 @@ func (c *bybitClient) GetCandles(ctx context.Context, symbol string, interval Ca
 	if err != nil {
 		return nil, err
 	}
-	limit := estimateBybitLimit(start, end, interval)
-	params := map[string]interface{}{
-		"category": c.category,
-		"symbol":   symbol,
-		"interval": bybitInterval,
-	}
-	if !start.IsZero() {
-		params["start"] = start.UnixMilli()
-	}
-	if !end.IsZero() {
-		params["end"] = end.UnixMilli()
-	}
-	if limit > 0 {
-		params["limit"] = limit
-	}
-
-	resp, err := c.client.NewUtaBybitServiceWithParams(params).GetMarketKline(ctx)
+	ranges, err := splitCandleRange(start, end, interval, 200)
 	if err != nil {
-		return nil, mapBybitError(err)
+		return nil, err
 	}
-	if err := bybitResponseError(resp); err != nil {
-		return nil, mapBybitError(err)
-	}
-	klines, err := parseBybitKlines(resp)
-	if err != nil {
-		return nil, mapBybitError(err)
-	}
-
-	out := make([]Candle, 0, len(klines))
-	for _, k := range klines {
-		ms, err := strconv.ParseInt(k.StartTime, 10, 64)
-		if err != nil {
-			continue
+	out := make([]Candle, 0)
+	for _, r := range ranges {
+		if err := ctx.Err(); err != nil {
+			return nil, err
 		}
-		openTime := time.UnixMilli(ms)
-		out = append(out, Candle{
-			Symbol:    symbol,
-			Interval:  interval,
-			OpenTime:  openTime,
-			CloseTime: openTime.Add(mustDuration(interval)),
-			Open:      k.OpenPrice,
-			High:      k.HighPrice,
-			Low:       k.LowPrice,
-			Close:     k.ClosePrice,
-			Volume:    k.Volume,
-		})
-	}
-	if len(out) > 1 {
-		sort.Slice(out, func(i, j int) bool {
-			return out[i].OpenTime.Before(out[j].OpenTime)
-		})
+		limit := estimateBybitLimit(r.Start, r.End, interval)
+		params := map[string]interface{}{
+			"category": c.category,
+			"symbol":   symbol,
+			"interval": bybitInterval,
+		}
+		if !r.Start.IsZero() {
+			params["start"] = r.Start.UnixMilli()
+		}
+		if !r.End.IsZero() {
+			params["end"] = r.End.UnixMilli()
+		}
+		if limit > 0 {
+			params["limit"] = limit
+		}
+
+		resp, err := c.client.NewUtaBybitServiceWithParams(params).GetMarketKline(ctx)
+		if err != nil {
+			return nil, mapBybitError(err)
+		}
+		if err := bybitResponseError(resp); err != nil {
+			return nil, mapBybitError(err)
+		}
+		klines, err := parseBybitKlines(resp)
+		if err != nil {
+			return nil, mapBybitError(err)
+		}
+
+		chunk := make([]Candle, 0, len(klines))
+		for _, k := range klines {
+			ms, err := strconv.ParseInt(k.StartTime, 10, 64)
+			if err != nil {
+				continue
+			}
+			openTime := time.UnixMilli(ms)
+			chunk = append(chunk, Candle{
+				Symbol:    symbol,
+				Interval:  interval,
+				OpenTime:  openTime,
+				CloseTime: openTime.Add(mustDuration(interval)),
+				Open:      k.OpenPrice,
+				High:      k.HighPrice,
+				Low:       k.LowPrice,
+				Close:     k.ClosePrice,
+				Volume:    k.Volume,
+			})
+		}
+		if len(chunk) > 1 {
+			sort.Slice(chunk, func(i, j int) bool {
+				return chunk[i].OpenTime.Before(chunk[j].OpenTime)
+			})
+		}
+		out = append(out, chunk...)
 	}
 	return out, nil
 }

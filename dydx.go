@@ -34,13 +34,13 @@ func newDydx(cfg Config) (*dydxClient, error) {
 		networkID = types.NetworkIdRopsten
 	}
 	options := types.Options{
-		NetworkId:                   networkID,
-		Host:                        host,
-		DefaultEthereumAddress:      cfg.EthereumAddress,
-		StarkPublicKey:              cfg.StarkPublicKey,
-		StarkPrivateKey:             cfg.StarkPrivateKey,
-		StarkPublicKeyYCoordinate:   cfg.StarkPublicKeyYCoordinate,
-		ApiKeyCredentials:           &types.ApiKeyCredentials{Key: cfg.APIKey, Secret: cfg.APISecret, Passphrase: cfg.Passphrase},
+		NetworkId:                 networkID,
+		Host:                      host,
+		DefaultEthereumAddress:    cfg.EthereumAddress,
+		StarkPublicKey:            cfg.StarkPublicKey,
+		StarkPrivateKey:           cfg.StarkPrivateKey,
+		StarkPublicKeyYCoordinate: cfg.StarkPublicKeyYCoordinate,
+		ApiKeyCredentials:         &types.ApiKeyCredentials{Key: cfg.APIKey, Secret: cfg.APISecret, Passphrase: cfg.Passphrase},
 	}
 	client := dydx.New(options)
 	client.Logger = nil
@@ -100,37 +100,51 @@ func (c *dydxClient) GetCandles(ctx context.Context, symbol string, interval Can
 	if err != nil {
 		return nil, err
 	}
-	limit := estimateDydxLimit(start, end, interval)
-	req := &public.CandlesParam{
-		Market:     symbol,
-		Resolution: resolution,
-	}
-	if !start.IsZero() {
-		req.FromISO = start.Format(time.RFC3339)
-	}
-	if !end.IsZero() {
-		req.ToISO = end.Format(time.RFC3339)
-	}
-	if limit > 0 {
-		req.Limit = limit
-	}
-	resp, err := c.client.Public.GetCandles(req)
+	ranges, err := splitCandleRange(start, end, interval, 100)
 	if err != nil {
-		return nil, mapDydxError(err)
+		return nil, err
 	}
-	out := make([]Candle, 0, len(resp.Candles))
-	for _, k := range resp.Candles {
-		out = append(out, Candle{
-			Symbol:    symbol,
-			Interval:  interval,
-			OpenTime:  k.StartedAt,
-			CloseTime: k.UpdatedAt,
-			Open:      k.Open,
-			High:      k.High,
-			Low:       k.Low,
-			Close:     k.Close,
-			Volume:    k.UsdVolume,
-			Trades:    k.Trades,
+	out := make([]Candle, 0)
+	for _, r := range ranges {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		limit := estimateDydxLimit(r.Start, r.End, interval)
+		req := &public.CandlesParam{
+			Market:     symbol,
+			Resolution: resolution,
+		}
+		if !r.Start.IsZero() {
+			req.FromISO = r.Start.Format(time.RFC3339)
+		}
+		if !r.End.IsZero() {
+			req.ToISO = r.End.Format(time.RFC3339)
+		}
+		if limit > 0 {
+			req.Limit = limit
+		}
+		resp, err := c.client.Public.GetCandles(req)
+		if err != nil {
+			return nil, mapDydxError(err)
+		}
+		for _, k := range resp.Candles {
+			out = append(out, Candle{
+				Symbol:    symbol,
+				Interval:  interval,
+				OpenTime:  k.StartedAt,
+				CloseTime: k.UpdatedAt,
+				Open:      k.Open,
+				High:      k.High,
+				Low:       k.Low,
+				Close:     k.Close,
+				Volume:    k.UsdVolume,
+				Trades:    k.Trades,
+			})
+		}
+	}
+	if len(ranges) > 1 && len(out) > 1 {
+		sort.Slice(out, func(i, j int) bool {
+			return out[i].OpenTime.Before(out[j].OpenTime)
 		})
 	}
 	return out, nil

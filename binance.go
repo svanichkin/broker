@@ -71,34 +71,45 @@ func (c *binanceClient) GetCandles(ctx context.Context, symbol string, interval 
 	if err != nil {
 		return nil, err
 	}
-	limit := estimateLimit(start, end, interval)
-	service := c.client.NewKlinesService().Symbol(symbol).Interval(binanceInterval)
-	if !start.IsZero() {
-		service.StartTime(start.UnixMilli())
-	}
-	if !end.IsZero() {
-		service.EndTime(end.UnixMilli())
-	}
-	if limit > 0 {
-		service.Limit(limit)
-	}
-	klines, err := service.Do(ctx)
+	ranges, err := splitCandleRange(start, end, interval, 1000)
 	if err != nil {
-		return nil, mapBinanceError(err)
+		return nil, err
 	}
-	out := make([]Candle, 0, len(klines))
-	for _, k := range klines {
-		out = append(out, Candle{
-			Symbol:    symbol,
-			Interval: interval,
-			OpenTime:  time.UnixMilli(k.OpenTime),
-			CloseTime: time.UnixMilli(k.CloseTime),
-			Open:      k.Open,
-			High:      k.High,
-			Low:       k.Low,
-			Close:     k.Close,
-			Volume:    k.Volume,
-			Trades:    strconv.FormatInt(k.TradeNum, 10),
+	out := make([]Candle, 0)
+	for _, r := range ranges {
+		service := c.client.NewKlinesService().Symbol(symbol).Interval(binanceInterval)
+		if !r.Start.IsZero() {
+			service.StartTime(r.Start.UnixMilli())
+		}
+		if !r.End.IsZero() {
+			service.EndTime(r.End.UnixMilli())
+		}
+		limit := estimateLimit(r.Start, r.End, interval)
+		if limit > 0 {
+			service.Limit(limit)
+		}
+		klines, err := service.Do(ctx)
+		if err != nil {
+			return nil, mapBinanceError(err)
+		}
+		for _, k := range klines {
+			out = append(out, Candle{
+				Symbol:    symbol,
+				Interval:  interval,
+				OpenTime:  time.UnixMilli(k.OpenTime),
+				CloseTime: time.UnixMilli(k.CloseTime),
+				Open:      k.Open,
+				High:      k.High,
+				Low:       k.Low,
+				Close:     k.Close,
+				Volume:    k.Volume,
+				Trades:    strconv.FormatInt(k.TradeNum, 10),
+			})
+		}
+	}
+	if len(ranges) > 1 && len(out) > 1 {
+		sort.Slice(out, func(i, j int) bool {
+			return out[i].OpenTime.Before(out[j].OpenTime)
 		})
 	}
 	return out, nil

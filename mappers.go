@@ -24,6 +24,38 @@ func intervalDuration(interval CandleInterval) (time.Duration, error) {
 	}
 }
 
+type timeRange struct {
+	Start time.Time
+	End   time.Time
+}
+
+func splitCandleRange(start, end time.Time, interval CandleInterval, max int) ([]timeRange, error) {
+	if max <= 0 {
+		return []timeRange{{Start: start, End: end}}, nil
+	}
+	dur, err := intervalDuration(interval)
+	if err != nil || dur == 0 {
+		return []timeRange{{Start: start, End: end}}, err
+	}
+	if start.IsZero() || end.IsZero() || end.Before(start) {
+		return []timeRange{{Start: start, End: end}}, nil
+	}
+	ranges := make([]timeRange, 0, 1)
+	maxSpan := dur * time.Duration(max-1)
+	for curStart := start; !curStart.After(end); {
+		curEnd := curStart.Add(maxSpan)
+		if curEnd.After(end) {
+			curEnd = end
+		}
+		ranges = append(ranges, timeRange{Start: curStart, End: curEnd})
+		if curEnd.Equal(end) {
+			break
+		}
+		curStart = curEnd.Add(dur)
+	}
+	return ranges, nil
+}
+
 func subscribeByPolling(ctx context.Context, interval time.Duration, fetch func(context.Context) (Candle, error)) (<-chan Candle, <-chan error) {
 	out := make(chan Candle)
 	errs := make(chan error, 1)

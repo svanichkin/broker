@@ -64,6 +64,14 @@ func closedCandleBoundary(end time.Time) time.Time {
 	return end
 }
 
+func lastClosedEnd(now time.Time, interval CandleInterval) (time.Time, error) {
+	dur, err := intervalDuration(interval)
+	if err != nil || dur == 0 {
+		return time.Time{}, err
+	}
+	return now.UTC().Truncate(dur), nil
+}
+
 func filterClosedCandles(candles []Candle, end time.Time) []Candle {
 	if len(candles) == 0 {
 		return candles

@@ -43,7 +43,10 @@ func (c *binanceClient) SubscribeCandles(ctx context.Context, symbol string, int
 		return channelWithError(err)
 	}
 	return subscribeByPolling(ctx, dur, func(ctx context.Context) (Candle, error) {
-		end := time.Now()
+		end, err := lastClosedEnd(time.Now().UTC(), interval)
+		if err != nil {
+			return Candle{}, err
+		}
 		start := end.Add(-dur)
 		candles, err := c.GetCandles(ctx, symbol, interval, start, end)
 		if err != nil {

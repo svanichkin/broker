@@ -91,12 +91,16 @@ func (c *dydxClient) GetCandles(ctx context.Context, symbol string, interval Can
 		if err != nil {
 			return nil, err
 		}
-		return tickCandles(symbol, trades), nil
+		return filterClosedCandles(tickCandles(symbol, trades), end), nil
 	}
 	if interval == CandleIntervalSecond {
 		return c.getSecondCandles(ctx, symbol, start, end)
 	}
 	resolution, err := dydxResolution(interval)
+	if err != nil {
+		return nil, err
+	}
+	dur, err := intervalDuration(interval)
 	if err != nil {
 		return nil, err
 	}
@@ -132,7 +136,7 @@ func (c *dydxClient) GetCandles(ctx context.Context, symbol string, interval Can
 				Symbol:    symbol,
 				Interval:  interval,
 				OpenTime:  k.StartedAt,
-				CloseTime: k.UpdatedAt,
+				CloseTime: k.StartedAt.Add(dur),
 				Open:      k.Open,
 				High:      k.High,
 				Low:       k.Low,
@@ -147,7 +151,7 @@ func (c *dydxClient) GetCandles(ctx context.Context, symbol string, interval Can
 			return out[i].OpenTime.Before(out[j].OpenTime)
 		})
 	}
-	return out, nil
+	return filterClosedCandles(out, end), nil
 }
 
 func (c *dydxClient) getSecondCandles(ctx context.Context, symbol string, start, end time.Time) ([]Candle, error) {
@@ -155,7 +159,7 @@ func (c *dydxClient) getSecondCandles(ctx context.Context, symbol string, start,
 	if err != nil {
 		return nil, err
 	}
-	return aggregateSecondCandles(symbol, trades), nil
+	return filterClosedCandles(aggregateSecondCandles(symbol, trades), end), nil
 }
 
 func (c *dydxClient) getTickTrades(ctx context.Context, symbol string, start, end time.Time) ([]tradeTick, error) {

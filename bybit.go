@@ -81,7 +81,7 @@ func (c *bybitClient) GetCandles(ctx context.Context, symbol string, interval Ca
 		if err != nil {
 			return nil, err
 		}
-		return tickCandles(symbol, trades), nil
+		return filterClosedCandles(tickCandles(symbol, trades), end), nil
 	}
 	if interval == CandleIntervalSecond {
 		return c.getSecondCandles(ctx, symbol, start, end)
@@ -153,7 +153,7 @@ func (c *bybitClient) GetCandles(ctx context.Context, symbol string, interval Ca
 		}
 		out = append(out, chunk...)
 	}
-	return out, nil
+	return filterClosedCandles(out, end), nil
 }
 
 func (c *bybitClient) getSecondCandles(ctx context.Context, symbol string, start, end time.Time) ([]Candle, error) {
@@ -161,7 +161,7 @@ func (c *bybitClient) getSecondCandles(ctx context.Context, symbol string, start
 	if err != nil {
 		return nil, err
 	}
-	return aggregateSecondCandles(symbol, trades), nil
+	return filterClosedCandles(aggregateSecondCandles(symbol, trades), end), nil
 }
 
 func (c *bybitClient) getTickTrades(ctx context.Context, symbol string, start, end time.Time) ([]tradeTick, error) {

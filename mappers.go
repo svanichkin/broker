@@ -56,6 +56,29 @@ func splitCandleRange(start, end time.Time, interval CandleInterval, max int) ([
 	return ranges, nil
 }
 
+func closedCandleBoundary(end time.Time) time.Time {
+	now := time.Now().UTC()
+	if end.IsZero() || end.After(now) {
+		return now
+	}
+	return end
+}
+
+func filterClosedCandles(candles []Candle, end time.Time) []Candle {
+	if len(candles) == 0 {
+		return candles
+	}
+	boundary := closedCandleBoundary(end)
+	out := make([]Candle, 0, len(candles))
+	for _, candle := range candles {
+		if candle.CloseTime.After(boundary) {
+			continue
+		}
+		out = append(out, candle)
+	}
+	return out
+}
+
 func subscribeByPolling(ctx context.Context, interval time.Duration, fetch func(context.Context) (Candle, error)) (<-chan Candle, <-chan error) {
 	out := make(chan Candle)
 	errs := make(chan error, 1)

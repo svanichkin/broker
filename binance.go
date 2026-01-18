@@ -62,7 +62,7 @@ func (c *binanceClient) GetCandles(ctx context.Context, symbol string, interval 
 		if err != nil {
 			return nil, err
 		}
-		return tickCandles(symbol, trades), nil
+		return filterClosedCandles(tickCandles(symbol, trades), end), nil
 	}
 	if interval == CandleIntervalSecond {
 		return c.getSecondCandles(ctx, symbol, start, end)
@@ -112,7 +112,7 @@ func (c *binanceClient) GetCandles(ctx context.Context, symbol string, interval 
 			return out[i].OpenTime.Before(out[j].OpenTime)
 		})
 	}
-	return out, nil
+	return filterClosedCandles(out, end), nil
 }
 
 func (c *binanceClient) getSecondCandles(ctx context.Context, symbol string, start, end time.Time) ([]Candle, error) {
@@ -120,7 +120,7 @@ func (c *binanceClient) getSecondCandles(ctx context.Context, symbol string, sta
 	if err != nil {
 		return nil, err
 	}
-	return aggregateSecondCandles(symbol, trades), nil
+	return filterClosedCandles(aggregateSecondCandles(symbol, trades), end), nil
 }
 
 func (c *binanceClient) getTickTrades(ctx context.Context, symbol string, start, end time.Time) ([]tradeTick, error) {

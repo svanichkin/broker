@@ -29,6 +29,13 @@ const (
 	CandleIntervalDay    CandleInterval = "1d"
 )
 
+type MarketType string
+
+const (
+	MarketSpot        MarketType = "spot"
+	MarketDerivatives MarketType = "derivatives"
+)
+
 type OrderStatus string
 
 const (
@@ -62,17 +69,26 @@ const (
 )
 
 type Order struct {
-	ID        string
-	Symbol    string
-	Side      OrderSide
-	Type      OrderType
-	Status    OrderStatus
-	Quantity  string
-	Filled    string
-	Price     string
-	AvgPrice  string
-	CreatedAt time.Time
-	UpdatedAt time.Time
+	ID             string
+	Symbol         string
+	Market         MarketType
+	Side           OrderSide
+	Type           OrderType
+	Status         OrderStatus
+	Quantity       string
+	Filled         string
+	Price          string
+	AvgPrice       string
+	CumExecFee     string
+	ReduceOnly     bool
+	CloseOnTrigger bool
+	CreatedAt      time.Time
+	UpdatedAt      time.Time
+}
+
+type FeeRates struct {
+	Maker string
+	Taker string
 }
 
 type Balance struct {
@@ -84,6 +100,8 @@ type Balance struct {
 
 type PlaceOrderRequest struct {
 	Symbol        string
+	Market        MarketType
+	Leverage      string
 	Side          OrderSide
 	Type          OrderType
 	Quantity      string
@@ -114,9 +132,9 @@ type Config struct {
 	BaseURL    string
 	Timeout    time.Duration
 	// dYdX-specific credentials
-	EthereumAddress          string
-	StarkPublicKey           string
-	StarkPrivateKey          string
+	EthereumAddress           string
+	StarkPublicKey            string
+	StarkPrivateKey           string
 	StarkPublicKeyYCoordinate string
 }
 
@@ -130,6 +148,7 @@ type Exchange interface {
 	GetBalances(ctx context.Context) ([]Balance, error)
 	ListOpenOrders(ctx context.Context, symbol string) ([]Order, error)
 	ListOrders(ctx context.Context, symbol string, status OrderStatus) ([]Order, error)
+	GetFeeRates(ctx context.Context, symbol string, market MarketType) (FeeRates, error)
 	PlaceOrder(ctx context.Context, req PlaceOrderRequest) (Order, error)
 	CancelOrder(ctx context.Context, symbol, orderID string) error
 	GetOrder(ctx context.Context, symbol, orderID string) (Order, error)

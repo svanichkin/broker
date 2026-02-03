@@ -301,6 +301,24 @@ func (c *dydxClient) GetBalances(ctx context.Context) ([]Balance, error) {
 	}}, nil
 }
 
+func (c *dydxClient) GetFeeRates(ctx context.Context, symbol string, market MarketType) (FeeRates, error) {
+	if err := ctx.Err(); err != nil {
+		return FeeRates{}, err
+	}
+	if market == MarketSpot {
+		return FeeRates{}, ErrNotSupported
+	}
+	_ = symbol
+	resp, err := c.client.Private.GetUsers()
+	if err != nil {
+		return FeeRates{}, mapDydxError(err)
+	}
+	if resp == nil {
+		return FeeRates{}, ErrNotSupported
+	}
+	return FeeRates{Maker: resp.User.MakerFeeRate, Taker: resp.User.TakerFeeRate}, nil
+}
+
 func (c *dydxClient) ListOpenOrders(ctx context.Context, symbol string) ([]Order, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
@@ -350,6 +368,12 @@ func (c *dydxClient) ListOrders(ctx context.Context, symbol string, status Order
 }
 
 func (c *dydxClient) PlaceOrder(ctx context.Context, req PlaceOrderRequest) (Order, error) {
+	if req.Market == MarketSpot {
+		return Order{}, ErrNotSupported
+	}
+	if req.Leverage != "" {
+		return Order{}, ErrNotSupported
+	}
 	if err := ctx.Err(); err != nil {
 		return Order{}, err
 	}
@@ -512,6 +536,7 @@ func mapDydxOrder(o private.Order) Order {
 	return Order{
 		ID:        o.ID,
 		Symbol:    o.Market,
+		Market:    MarketDerivatives,
 		Side:      mapDydxSideFromAPI(o.Side),
 		Type:      mapDydxTypeFromAPI(o.Type),
 		Status:    status,

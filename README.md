@@ -89,6 +89,7 @@ type Exchange interface {
 	GetBalances(ctx context.Context) ([]Balance, error)
 	ListOpenOrders(ctx context.Context, symbol string) ([]Order, error)
 	ListOrders(ctx context.Context, symbol string, status OrderStatus) ([]Order, error)
+	GetFeeRates(ctx context.Context, symbol string, market MarketType) (FeeRates, error)
 	PlaceOrder(ctx context.Context, req PlaceOrderRequest) (Order, error)
 	CancelOrder(ctx context.Context, symbol, orderID string) error
 	GetOrder(ctx context.Context, symbol, orderID string) (Order, error)
@@ -117,6 +118,12 @@ const (
 	CandleIntervalMinute CandleInterval = "1m"
 	CandleIntervalHour   CandleInterval = "1h"
 	CandleIntervalDay    CandleInterval = "1d"
+)
+
+type MarketType string
+const (
+	MarketSpot        MarketType = "spot"
+	MarketDerivatives MarketType = "derivatives"
 )
 
 type OrderStatus string
@@ -174,6 +181,8 @@ type Config struct {
 
 type PlaceOrderRequest struct {
 	Symbol        string      // required
+	Market        MarketType  // optional: spot/derivatives
+	Leverage      string      // optional
 	Side          OrderSide    // BUY/SELL
 	Type          OrderType    // LIMIT/MARKET
 	Quantity      string      // required
@@ -186,6 +195,7 @@ type PlaceOrderRequest struct {
 type Order struct {
 	ID        string
 	Symbol    string
+	Market    MarketType
 	Side      OrderSide
 	Type      OrderType
 	Status    OrderStatus

@@ -8,7 +8,6 @@ require github.com/google/uuid v1.5.0 // indirect
 
 require (
 	github.com/bitly/go-simplejson v0.5.1 // indirect
-	github.com/bybit-exchange/bybit.go.api v0.0.0-20250421211709-d5b2b36fdf4b
 	github.com/google/go-cmp v0.5.8 // indirect
 	github.com/json-iterator/go v1.1.12 // indirect
 	github.com/kr/pretty v0.3.0 // indirect

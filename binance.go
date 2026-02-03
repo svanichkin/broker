@@ -247,6 +247,28 @@ func (c *binanceClient) GetBalances(ctx context.Context) ([]Balance, error) {
 	return out, nil
 }
 
+func (c *binanceClient) GetFeeRates(ctx context.Context, symbol string, market MarketType) (FeeRates, error) {
+	if err := ctx.Err(); err != nil {
+		return FeeRates{}, err
+	}
+	if market == MarketDerivatives {
+		return FeeRates{}, ErrNotSupported
+	}
+	svc := c.client.NewTradeFeeService()
+	if symbol != "" {
+		svc.Symbol(strings.ToUpper(symbol))
+	}
+	fees, err := svc.Do(ctx)
+	if err != nil {
+		return FeeRates{}, mapBinanceError(err)
+	}
+	if len(fees) == 0 {
+		return FeeRates{}, ErrNotSupported
+	}
+	fee := fees[0]
+	return FeeRates{Maker: fee.MakerCommission, Taker: fee.TakerCommission}, nil
+}
+
 func (c *binanceClient) ListOpenOrders(ctx context.Context, symbol string) ([]Order, error) {
 	service := c.client.NewListOpenOrdersService()
 	if symbol != "" {
@@ -284,6 +306,12 @@ func (c *binanceClient) ListOrders(ctx context.Context, symbol string, status Or
 }
 
 func (c *binanceClient) PlaceOrder(ctx context.Context, req PlaceOrderRequest) (Order, error) {
+	if req.Market == MarketDerivatives {
+		return Order{}, ErrNotSupported
+	}
+	if req.Leverage != "" {
+		return Order{}, ErrNotSupported
+	}
 	if req.Symbol == "" || req.Quantity == "" {
 		return Order{}, ErrInvalidConfig
 	}
@@ -382,6 +410,7 @@ func mapBinanceOrder(o *binance.Order) Order {
 	return Order{
 		ID:        strconv.FormatInt(o.OrderID, 10),
 		Symbol:    o.Symbol,
+		Market:    MarketSpot,
 		Side:      OrderSide(o.Side),
 		Type:      OrderType(o.Type),
 		Status:    mapBinanceStatus(o.Status),
@@ -406,6 +435,7 @@ func mapBinanceCreateOrder(o *binance.CreateOrderResponse) Order {
 	return Order{
 		ID:        strconv.FormatInt(o.OrderID, 10),
 		Symbol:    o.Symbol,
+		Market:    MarketSpot,
 		Side:      OrderSide(o.Side),
 		Type:      OrderType(o.Type),
 		Status:    mapBinanceStatus(o.Status),

@@ -356,14 +356,7 @@ func (c *bybitClient) ListOpenOrders(ctx context.Context, symbol string) ([]Orde
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	params := map[string]string{
-		"category": c.category,
-		"limit":    "50",
-	}
-	if symbol != "" {
-		params["symbol"] = symbol
-	}
-	return c.listOrdersPaged(ctx, "/v5/order/realtime", params)
+	return c.listOrdersAllCategories(ctx, "/v5/order/realtime", symbol)
 }
 
 func (c *bybitClient) ListOrders(ctx context.Context, symbol string, status OrderStatus) ([]Order, error) {
@@ -373,12 +366,7 @@ func (c *bybitClient) ListOrders(ctx context.Context, symbol string, status Orde
 	if symbol == "" {
 		return nil, ErrInvalidConfig
 	}
-	params := map[string]string{
-		"category": c.category,
-		"symbol":   symbol,
-		"limit":    "50",
-	}
-	orders, err := c.listOrdersPaged(ctx, "/v5/order/history", params)
+	orders, err := c.listOrdersAllCategories(ctx, "/v5/order/history", symbol)
 	if err != nil {
 		return nil, err
 	}
@@ -439,6 +427,9 @@ func (c *bybitClient) PlaceOrder(ctx context.Context, req PlaceOrderRequest) (Or
 	if req.ReduceOnly {
 		payload["reduceOnly"] = true
 	}
+	if req.PositionIdx != "" {
+		payload["positionIdx"] = req.PositionIdx
+	}
 
 	resp, err := c.doRequest(ctx, http.MethodPost, "/v5/order/create", nil, payload, true)
 	if err != nil {
@@ -498,35 +489,32 @@ func (c *bybitClient) GetOrder(ctx context.Context, symbol, orderID string) (Ord
 		return Order{}, ErrInvalidConfig
 	}
 	categories := []string{c.category, "spot"}
+	paths := []string{"/v5/order/realtime", "/v5/order/history"}
 	for _, category := range categories {
-		params := map[string]string{
-			"category": category,
-			"symbol":   symbol,
-			"orderId":  orderID,
-			"limit":    "1",
-		}
-		resp, err := c.doRequest(ctx, http.MethodGet, "/v5/order/history", params, nil, true)
-		if err != nil {
-			mapped := mapBybitError(err)
-			if errors.Is(mapped, ErrOrderNotFound) {
+		for _, path := range paths {
+			params := map[string]string{
+				"category": category,
+				"symbol":   symbol,
+				"orderId":  orderID,
+				"limit":    "1",
+			}
+			resp, err := c.doRequest(ctx, http.MethodGet, path, params, nil, true)
+			if err != nil {
+				mapped := mapBybitError(err)
+				if errors.Is(mapped, ErrOrderNotFound) {
+					continue
+				}
+				return Order{}, mapped
+			}
+			var result bybitV5OrderListResult
+			if err := parseBybitResult(resp, &result); err != nil {
+				return Order{}, err
+			}
+			if len(result.List) == 0 {
 				continue
 			}
-			return Order{}, mapped
+			return mapBybitOrderInfo(result.List[0], category), nil
 		}
-		var result bybitV5OrderListResult
-		if err := parseBybitResult(resp, &result); err != nil {
-			return Order{}, err
-		}
-		if len(result.List) == 0 {
-			continue
-		}
-		order := mapBybitOrderInfo(result.List[0])
-		if category == "spot" {
-			order.Market = MarketSpot
-		} else {
-			order.Market = MarketDerivatives
-		}
-		return order, nil
 	}
 	return Order{}, ErrOrderNotFound
 }
@@ -563,12 +551,19 @@ func (c *bybitClient) ServerTime(ctx context.Context) (time.Time, error) {
 	return time.Time{}, errors.New("bybit: invalid server time")
 }
 
-func (c *bybitClient) listOrdersPaged(ctx context.Context, path string, params map[string]string) ([]Order, error) {
+func (c *bybitClient) listOrdersPaged(ctx context.Context, path string, category string, symbol string) ([]Order, error) {
 	out := make([]Order, 0)
 	cursor := ""
-	for page := 0; page < 50; page++ {
+	for {
 		if err := ctx.Err(); err != nil {
 			return nil, err
+		}
+		params := map[string]string{
+			"category": category,
+			"limit":    "200",
+		}
+		if symbol != "" {
+			params["symbol"] = symbol
 		}
 		if cursor != "" {
 			params["cursor"] = cursor
@@ -584,7 +579,7 @@ func (c *bybitClient) listOrdersPaged(ctx context.Context, path string, params m
 			return nil, err
 		}
 		for _, o := range result.List {
-			out = append(out, mapBybitOrderInfo(o))
+			out = append(out, mapBybitOrderInfo(o, category))
 		}
 		if result.NextPageCursor == "" || result.NextPageCursor == cursor {
 			break
@@ -592,6 +587,34 @@ func (c *bybitClient) listOrdersPaged(ctx context.Context, path string, params m
 		cursor = result.NextPageCursor
 	}
 	return out, nil
+}
+
+func (c *bybitClient) listOrdersAllCategories(ctx context.Context, path string, symbol string) ([]Order, error) {
+	orders := make([]Order, 0)
+	categories := []string{c.category, "spot"}
+	seen := make(map[string]struct{})
+	for _, category := range categories {
+		if category == "spot" && symbol == "" {
+			continue
+		}
+		chunk, err := c.listOrdersPaged(ctx, path, category, symbol)
+		if err != nil {
+			return nil, err
+		}
+		for _, o := range chunk {
+			if o.ID == "" {
+				orders = append(orders, o)
+				continue
+			}
+			key := category + ":" + o.ID
+			if _, ok := seen[key]; ok {
+				continue
+			}
+			seen[key] = struct{}{}
+			orders = append(orders, o)
+		}
+	}
+	return orders, nil
 }
 
 func bybitInterval(interval CandleInterval) (string, error) {
@@ -607,7 +630,7 @@ func bybitInterval(interval CandleInterval) (string, error) {
 	}
 }
 
-func mapBybitOrderInfo(o bybitV5Order) Order {
+func mapBybitOrderInfo(o bybitV5Order, category string) Order {
 	createdAt := parseBybitTime(o.CreatedTime)
 	updatedAt := parseBybitTime(o.UpdatedTime)
 	avgPrice := o.AvgPrice
@@ -621,7 +644,7 @@ func mapBybitOrderInfo(o bybitV5Order) Order {
 	return Order{
 		ID:             o.OrderId,
 		Symbol:         o.Symbol,
-		Market:         MarketDerivatives,
+		Market:         bybitMarketFromCategory(category),
 		Side:           mapBybitSideFromAPI(o.Side),
 		Type:           mapBybitTypeFromAPI(o.OrderType),
 		Status:         mapBybitStatus(o.OrderStatus),
@@ -645,12 +668,14 @@ func mapBybitStatus(status string) OrderStatus {
 		return OrderStatusPartiallyFilled
 	case "FILLED":
 		return OrderStatusFilled
+	case "TRIGGERED", "UNTRIGGERED", "DEACTIVATED":
+		return OrderStatusNew
 	case "CANCELLED", "CANCELED":
 		return OrderStatusCanceled
 	case "REJECTED":
 		return OrderStatusRejected
 	default:
-		return OrderStatusRejected
+		return OrderStatusUnknown
 	}
 }
 
@@ -686,6 +711,13 @@ func bybitCategory(market MarketType, fallback string) string {
 	}
 }
 
+func bybitMarketFromCategory(category string) MarketType {
+	if strings.EqualFold(category, "spot") {
+		return MarketSpot
+	}
+	return MarketDerivatives
+}
+
 func mapBybitTypeFromAPI(orderType string) OrderType {
 	if strings.ToUpper(orderType) == "MARKET" {
 		return OrderTypeMarket
@@ -705,6 +737,20 @@ func mapBybitTimeInForce(tif TimeInForce) string {
 }
 
 func mapBybitError(err error) error {
+	if err == nil {
+		return nil
+	}
+	var apiErr *bybitAPIError
+	if errors.As(err, &apiErr) {
+		switch apiErr.Code {
+		case 10001, 10002, 110001, 110002:
+			return wrapError(apiErr, ErrOrderNotFound)
+		}
+		msg := strings.ToLower(apiErr.Msg)
+		if strings.Contains(msg, "category") && strings.Contains(msg, "invalid") {
+			return wrapError(apiErr, ErrOrderNotFound)
+		}
+	}
 	return mapCommonError(err)
 }
 
@@ -713,6 +759,15 @@ type bybitV5Response struct {
 	RetMsg  string          `json:"retMsg"`
 	Result  json.RawMessage `json:"result"`
 	Time    int64           `json:"time"`
+}
+
+type bybitAPIError struct {
+	Code int
+	Msg  string
+}
+
+func (e *bybitAPIError) Error() string {
+	return fmt.Sprintf("bybit: %d %s", e.Code, e.Msg)
 }
 
 type bybitV5KlineResult struct {
@@ -842,7 +897,7 @@ func (c *bybitClient) doRequest(ctx context.Context, method, path string, params
 		return nil, err
 	}
 	if envelope.RetCode != 0 {
-		return nil, mapBybitError(fmt.Errorf("bybit: %d %s", envelope.RetCode, envelope.RetMsg))
+		return nil, mapBybitError(&bybitAPIError{Code: envelope.RetCode, Msg: envelope.RetMsg})
 	}
 	return data, nil
 }

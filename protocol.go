@@ -44,6 +44,7 @@ const (
 	OrderStatusFilled          OrderStatus = "FILLED"
 	OrderStatusCanceled        OrderStatus = "CANCELED"
 	OrderStatusRejected        OrderStatus = "REJECTED"
+	OrderStatusUnknown         OrderStatus = "UNKNOWN"
 )
 
 type OrderSide string
@@ -109,6 +110,7 @@ type PlaceOrderRequest struct {
 	TimeInForce   TimeInForce
 	ClientOrderID string
 	ReduceOnly    bool
+	PositionIdx   string
 }
 
 type Candle struct {

@@ -124,8 +124,9 @@ func (c *dydxClient) GetCandles(ctx context.Context, symbol string, interval Can
 		if !r.Start.IsZero() {
 			req.FromISO = r.Start.Format(time.RFC3339)
 		}
-		if !r.End.IsZero() {
-			req.ToISO = r.End.Format(time.RFC3339)
+		reqEnd := normalizeCandleRequestEnd(r.End, interval)
+		if !reqEnd.IsZero() {
+			req.ToISO = reqEnd.Format(time.RFC3339)
 		}
 		if limit > 0 {
 			req.Limit = limit

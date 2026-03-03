@@ -119,8 +119,9 @@ func (c *bybitClient) GetCandles(ctx context.Context, symbol string, interval Ca
 		if !r.Start.IsZero() {
 			params["start"] = strconv.FormatInt(r.Start.UnixMilli(), 10)
 		}
-		if !r.End.IsZero() {
-			params["end"] = strconv.FormatInt(r.End.UnixMilli(), 10)
+		reqEnd := normalizeCandleRequestEnd(r.End, interval)
+		if !reqEnd.IsZero() {
+			params["end"] = strconv.FormatInt(reqEnd.UnixMilli(), 10)
 		}
 		if limit > 0 {
 			params["limit"] = strconv.Itoa(limit)

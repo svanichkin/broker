@@ -84,8 +84,9 @@ func (c *binanceClient) GetCandles(ctx context.Context, symbol string, interval 
 		if !r.Start.IsZero() {
 			service.StartTime(r.Start.UnixMilli())
 		}
-		if !r.End.IsZero() {
-			service.EndTime(r.End.UnixMilli())
+		reqEnd := normalizeCandleRequestEnd(r.End, interval)
+		if !reqEnd.IsZero() {
+			service.EndTime(reqEnd.UnixMilli())
 		}
 		limit := estimateLimit(r.Start, r.End, interval)
 		if limit > 0 {

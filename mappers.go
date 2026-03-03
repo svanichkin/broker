@@ -87,6 +87,23 @@ func filterClosedCandles(candles []Candle, end time.Time) []Candle {
 	return out
 }
 
+func normalizeCandleRequestEnd(end time.Time, interval CandleInterval) time.Time {
+	if end.IsZero() {
+		return end
+	}
+	dur, err := intervalDuration(interval)
+	if err != nil || dur <= 0 {
+		return end
+	}
+	normalized := end.UTC()
+	// Many candle endpoints use open-time boundaries; querying exactly at a boundary
+	// may return only the next (still open) candle. Shift by 1ms in this case.
+	if normalized.Truncate(dur).Equal(normalized) {
+		return normalized.Add(-time.Millisecond)
+	}
+	return normalized
+}
+
 func subscribeByPolling(ctx context.Context, interval time.Duration, fetch func(context.Context) (Candle, error)) (<-chan Candle, <-chan error) {
 	out := make(chan Candle)
 	errs := make(chan error, 1)

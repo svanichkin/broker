@@ -112,28 +112,40 @@ func (c *bybitClient) GetCandles(ctx context.Context, symbol string, interval Ca
 		}
 		limit := estimateBybitLimit(r.Start, r.End, interval)
 		params := map[string]string{
-			"category": c.category,
 			"symbol":   symbol,
 			"interval": bybitInterval,
 		}
 		if !r.Start.IsZero() {
 			params["start"] = strconv.FormatInt(r.Start.UnixMilli(), 10)
 		}
-		reqEnd := normalizeCandleRequestEnd(r.End, interval)
-		if !reqEnd.IsZero() {
-			params["end"] = strconv.FormatInt(reqEnd.UnixMilli(), 10)
+		if !r.End.IsZero() {
+			params["end"] = strconv.FormatInt(r.End.UnixMilli(), 10)
 		}
 		if limit > 0 {
 			params["limit"] = strconv.Itoa(limit)
 		}
 
+		params["category"] = c.category
 		resp, err := c.doRequest(ctx, http.MethodGet, "/v5/market/kline", params, nil, false)
 		if err != nil {
-			return nil, err
+			return nil, fmt.Errorf("bybit get candles failed symbol=%s interval=%s category=%s range_start=%s range_end=%s: %w",
+				symbol, interval, c.category, r.Start.UTC().Format(time.RFC3339), r.End.UTC().Format(time.RFC3339), err)
 		}
 		var result bybitV5KlineResult
 		if err := parseBybitResult(resp, &result); err != nil {
-			return nil, err
+			return nil, fmt.Errorf("bybit parse kline result failed symbol=%s interval=%s category=%s range_start=%s range_end=%s: %w",
+				symbol, interval, c.category, r.Start.UTC().Format(time.RFC3339), r.End.UTC().Format(time.RFC3339), err)
+		}
+		if len(result.List) == 0 {
+			return nil, wrapError(fmt.Errorf("bybit returned empty kline list symbol=%s interval=%s category=%s range_start=%s range_end=%s params_start_ms=%s params_end_ms=%s",
+				symbol,
+				interval,
+				c.category,
+				r.Start.UTC().Format(time.RFC3339),
+				r.End.UTC().Format(time.RFC3339),
+				params["start"],
+				params["end"],
+			), ErrNotSupported)
 		}
 
 		chunk := make([]Candle, 0, len(result.List))
@@ -165,7 +177,7 @@ func (c *bybitClient) GetCandles(ctx context.Context, symbol string, interval Ca
 		}
 		out = append(out, chunk...)
 	}
-	return filterClosedCandles(out, end), nil
+	return filterCandlesByOpenTime(out, start, end), nil
 }
 
 func (c *bybitClient) getSecondCandles(ctx context.Context, symbol string, start, end time.Time) ([]Candle, error) {
@@ -893,12 +905,20 @@ func (c *bybitClient) doRequest(ctx context.Context, method, path string, params
 	if err != nil {
 		return nil, err
 	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return nil, mapBybitError(fmt.Errorf("bybit http %d %s %s query=%q body=%q",
+			resp.StatusCode, method, path, queryStr, trimForError(data, 512)))
+	}
 	var envelope bybitV5Response
 	if err := json.Unmarshal(data, &envelope); err != nil {
-		return nil, err
+		return nil, fmt.Errorf("bybit decode response failed method=%s path=%s query=%q: %w body=%q",
+			method, path, queryStr, err, trimForError(data, 512))
 	}
 	if envelope.RetCode != 0 {
-		return nil, mapBybitError(&bybitAPIError{Code: envelope.RetCode, Msg: envelope.RetMsg})
+		return nil, mapBybitError(&bybitAPIError{
+			Code: envelope.RetCode,
+			Msg:  fmt.Sprintf("%s (method=%s path=%s query=%q)", envelope.RetMsg, method, path, queryStr),
+		})
 	}
 	return data, nil
 }
@@ -912,6 +932,13 @@ func parseBybitResult(data []byte, out interface{}) error {
 		return errors.New("bybit: empty result")
 	}
 	return json.Unmarshal(envelope.Result, out)
+}
+
+func trimForError(data []byte, limit int) string {
+	if limit <= 0 || len(data) <= limit {
+		return string(data)
+	}
+	return string(data[:limit]) + "...(truncated)"
 }
 
 func bybitSign(secret, timestamp, apiKey, recvWindow, payload string) string {

@@ -87,6 +87,28 @@ func filterClosedCandles(candles []Candle, end time.Time) []Candle {
 	return out
 }
 
+func filterCandlesByOpenTime(candles []Candle, start, end time.Time) []Candle {
+	if len(candles) == 0 {
+		return candles
+	}
+	now := time.Now().UTC()
+	out := make([]Candle, 0, len(candles))
+	for _, candle := range candles {
+		if !start.IsZero() && candle.OpenTime.Before(start) {
+			continue
+		}
+		if !end.IsZero() && candle.OpenTime.After(end) {
+			continue
+		}
+		// Never return a currently forming candle.
+		if candle.CloseTime.After(now) {
+			continue
+		}
+		out = append(out, candle)
+	}
+	return out
+}
+
 func normalizeCandleRequestEnd(end time.Time, interval CandleInterval) time.Time {
 	if end.IsZero() {
 		return end

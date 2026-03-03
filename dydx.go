@@ -155,7 +155,7 @@ func (c *dydxClient) GetCandles(ctx context.Context, symbol string, interval Can
 			return out[i].OpenTime.Before(out[j].OpenTime)
 		})
 	}
-	return filterClosedCandles(out, end), nil
+	return filterCandlesByOpenTime(out, start, end), nil
 }
 
 func (c *dydxClient) getSecondCandles(ctx context.Context, symbol string, start, end time.Time) ([]Candle, error) {

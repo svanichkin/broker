@@ -30,3 +30,19 @@ func TestNormalizeCandleRequestEnd(t *testing.T) {
 		}
 	})
 }
+
+func TestFilterCandlesByOpenTime_IncludesRightBoundary(t *testing.T) {
+	start := time.Date(2021, 10, 31, 0, 0, 0, 0, time.UTC)
+	end := time.Date(2021, 11, 1, 0, 0, 0, 0, time.UTC)
+	c := Candle{
+		Symbol:    "ENJUSDT",
+		Interval:  CandleIntervalDay,
+		OpenTime:  end,
+		CloseTime: end.Add(24 * time.Hour),
+	}
+
+	got := filterCandlesByOpenTime([]Candle{c}, start, end)
+	if len(got) != 1 {
+		t.Fatalf("expected 1 candle, got %d", len(got))
+	}
+}
